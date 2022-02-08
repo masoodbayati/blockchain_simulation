@@ -1,4 +1,4 @@
-package chatroom
+package network
 
 import (
 	"context"

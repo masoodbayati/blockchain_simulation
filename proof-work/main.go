@@ -5,14 +5,18 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
-	"github.com/blockchain-tutorial/proof-work/chatroom"
+	"github.com/blockchain-tutorial/prometheus"
+	"github.com/blockchain-tutorial/proof-work/network"
 	type_def "github.com/blockchain-tutorial/proof-work/type"
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p-core/host"
 	"github.com/libp2p/go-libp2p-core/peer"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
+	prometheusClinet "github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"io"
 	"log"
 	"net/http"
@@ -24,13 +28,12 @@ import (
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/gorilla/mux"
-	"github.com/joho/godotenv"
 )
 
-const difficulty = 1
+const difficulty = 4
 
 var nick string
-var cr *chatroom.ChatRoom
+var cr *network.ChatRoom
 
 // Block represents each 'item' in the blockchain
 
@@ -40,20 +43,15 @@ var Blockchain []type_def.Block
 
 // Message takes incoming JSON payload for writing heart rate
 
-
 var mutex = &sync.Mutex{}
 
 func main() {
-	pendingBlock = make(chan *type_def.Block, chatroom.ChatRoomBufSize)
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatal(err)
-	}
-
+	prometheus.InitPrometheus()
+	pendingBlock = make(chan *type_def.Block, network.ChatRoomBufSize)
 	go func() {
 		t := time.Now()
 		genesisBlock := type_def.Block{}
-		genesisBlock = type_def.Block{"generated_block","",0, t.String(), 0, calculateHash(genesisBlock), "", difficulty, ""}
+		genesisBlock = type_def.Block{"generated_block", "", 0, t.String(), 0, calculateHash(genesisBlock), "", difficulty, ""}
 		spew.Dump(genesisBlock)
 
 		mutex.Lock()
@@ -64,12 +62,12 @@ func main() {
 
 }
 
-
-
 // web server
 func run() error {
 	ctx := context.Background()
 	roomFlag := "test"
+	httpPort := flag.String("port", "9091", "an int")
+	flag.Parse()
 
 	// create a new libp2p Host that listens on a random TCP port
 	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/0.0.0.0/tcp/0"))
@@ -90,21 +88,19 @@ func run() error {
 
 	// use the nickname from the cli flag, or a default if blank
 
-
 	nick = defaultNick(h.ID())
 
 	// join the room from the cli flag, or the flag default
 
 	// join the chat room
-	cr, err = chatroom.JoinChatRoom(ctx, ps, h.ID(), nick, roomFlag)
+	cr, err = network.JoinChatRoom(ctx, ps, h.ID(), nick, roomFlag)
 	if err != nil {
 		panic(err)
 	}
 	mux := makeMuxRouter()
-	httpPort := os.Getenv("PORT")
-	log.Println("HTTP Server Listening on port :", httpPort)
+	log.Println("HTTP Server Listening on port :", *httpPort)
 	s := &http.Server{
-		Addr:           ":" + httpPort,
+		Addr:           ":" + *httpPort,
 		Handler:        mux,
 		ReadTimeout:    10 * time.Second,
 		WriteTimeout:   10 * time.Second,
@@ -120,8 +116,8 @@ func run() error {
 
 func receveMessage() {
 	for {
-		message :=<- cr.Messages
-		println(message.Message,message.SenderID)
+		message := <-cr.Messages
+		println(message.Message, message.SenderID)
 		map_message := message.Message.(map[string]interface{})
 		switch map_message["typ"] {
 		case "pending_block":
@@ -133,10 +129,10 @@ func receveMessage() {
 				Blockchain = append(Blockchain, newBlock)
 				spew.Dump(Blockchain)
 			}
-			if newBlock.OwnerNick == nick{
+			if newBlock.OwnerNick == nick {
 				err := cr.Publish(newBlock)
-				if err!= nil{
-					println("err in publish",err)
+				if err != nil {
+					println("err in publish", err)
 				}
 			}
 
@@ -158,17 +154,19 @@ func receveMessage() {
 			continue
 		}
 
-
-		}
+	}
 }
-
-
 
 // create handlers
 func makeMuxRouter() http.Handler {
+
+	// Serving static files
+
 	muxRouter := mux.NewRouter()
+	muxRouter.Path("/metrics").Handler(promhttp.Handler())
 	muxRouter.HandleFunc("/", handleGetBlockchain).Methods("GET")
 	muxRouter.HandleFunc("/", handleWriteBlock).Methods("POST")
+	muxRouter.PathPrefix("/").Handler(http.FileServer(http.Dir("./static/")))
 	return muxRouter
 }
 
@@ -197,8 +195,8 @@ func handleWriteBlock(w http.ResponseWriter, r *http.Request) {
 
 	//ensure atomicity when creating new block
 	err := cr.Publish(m)
-	if err!= nil{
-		println("err in publish",err)
+	if err != nil {
+		println("err in publish", err)
 	}
 	mutex.Lock()
 	newBlock := generateBlock(Blockchain[len(Blockchain)-1], m.BPM)
@@ -208,10 +206,10 @@ func handleWriteBlock(w http.ResponseWriter, r *http.Request) {
 		Blockchain = append(Blockchain, newBlock)
 		spew.Dump(Blockchain)
 	}
-	if newBlock.OwnerNick == nick{
+	if newBlock.OwnerNick == nick {
 		err := cr.Publish(newBlock)
-		if err!= nil{
-			println("err in publish",err)
+		if err != nil {
+			println("err in publish", err)
 		}
 	}
 
@@ -259,6 +257,7 @@ func calculateHash(block type_def.Block) string {
 
 // create a new block using previous block's hash
 func generateBlock(oldBlock type_def.Block, BPM int) type_def.Block {
+	timer := prometheusClinet.NewTimer(prometheus.BlockCreationDuration.WithLabelValues("proof_of_work"))
 	var newBlock type_def.Block
 
 	t := time.Now()
@@ -274,9 +273,9 @@ func generateBlock(oldBlock type_def.Block, BPM int) type_def.Block {
 	for i := 0; ; i++ {
 		hex := fmt.Sprintf("%x", i)
 		newBlock.Nonce = hex
-		if len(pendingBlock)>0{
-			pendBlock :=<- pendingBlock
-			if pendBlock.PrevHash == newBlock.PrevHash{
+		if len(pendingBlock) > 0 {
+			pendBlock := <-pendingBlock
+			if pendBlock.PrevHash == newBlock.PrevHash {
 				println("we loose")
 				newBlock = *pendBlock
 				return newBlock
@@ -284,7 +283,7 @@ func generateBlock(oldBlock type_def.Block, BPM int) type_def.Block {
 		}
 		if !isHashValid(calculateHash(newBlock), newBlock.Difficulty) {
 			fmt.Println(calculateHash(newBlock), " do more work!")
-			time.Sleep(time.Second)
+			time.Sleep(time.Millisecond * 10)
 			continue
 		} else {
 			fmt.Println(calculateHash(newBlock), " work done!")
@@ -292,15 +291,15 @@ func generateBlock(oldBlock type_def.Block, BPM int) type_def.Block {
 			break
 		}
 	}
-	if len(pendingBlock)>0{
-		pendBlock :=<- pendingBlock
-		if pendBlock.PrevHash == newBlock.PrevHash{
+	if len(pendingBlock) > 0 {
+		pendBlock := <-pendingBlock
+		if pendBlock.PrevHash == newBlock.PrevHash {
 			println("we loose")
 			newBlock = *pendBlock
 			return newBlock
 		}
 	}
-
+	timer.ObserveDuration()
 	return newBlock
 }
 
@@ -309,11 +308,12 @@ func isHashValid(hash string, difficulty int) bool {
 	return strings.HasPrefix(hash, prefix)
 }
 
-
 type discoveryNotifee struct {
 	h host.Host
 }
+
 const DiscoveryServiceTag = "pubsub-chat-example"
+
 func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
 	fmt.Printf("discovered new peer %s\n", pi.ID.Pretty())
 	err := n.h.Connect(context.Background(), pi)

@@ -8,14 +8,18 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/blockchain-tutorial/srbft/chatroom"
+	"github.com/blockchain-tutorial/prometheus"
+	"github.com/blockchain-tutorial/srbft/network"
 	type_def "github.com/blockchain-tutorial/srbft/type"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/gorilla/mux"
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p-core/host"
 	"github.com/libp2p/go-libp2p-core/peer"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
+	prometheusClinet "github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"log"
 	"math"
 	"math/big"
@@ -23,8 +27,6 @@ import (
 	"os"
 	"sync"
 	"time"
-
-	"github.com/davecgh/go-spew/spew"
 )
 
 // Block represents each 'item' in the blockchain
@@ -35,8 +37,8 @@ var tempBlocks []type_def.BlockMessage
 var balance int
 
 // candidateBlocks handles incoming blocks for validation
-var candidateBlocks = make(chan type_def.BlockMessage)
-var submitChannel = make(chan type_def.Block)
+var candidateBlocks = make(chan type_def.BlockMessage, 20480)
+var submitChannel = make(chan type_def.Block, 20480)
 
 // announcements broadcasts winning validator to all nodes
 
@@ -45,15 +47,16 @@ var mutex = &sync.Mutex{}
 // validators keeps track of open validators and balances
 var validators = make(map[string]int)
 var nick string
-var cr *chatroom.ChatRoom
-var validatorChannel *chatroom.ChatRoom
+var cr *network.ChatRoom
+var validatorChannel *network.ChatRoom
 var address host.Host
 var isCandidate *bool
 
 func main() {
+	prometheus.InitPrometheus()
 	ctx := context.Background()
 	roomFlag := flag.String("network", "0", "network_id")
-	httpPort := flag.String("port", "8080", "an int")
+	httpPort := flag.String("port", "9091", "an int")
 	isCandidate = flag.Bool("is_candidate", false, "is candidate")
 	flag.Parse()
 	// create a new libp2p Host that listens on a random TCP port
@@ -77,7 +80,7 @@ func main() {
 	// join the room from the cli flag, or the flag default
 
 	// join the chat room
-	cr, err = chatroom.JoinChatRoom(ctx, ps, address.ID(), nick, *roomFlag)
+	cr, err = network.JoinChatRoom(ctx, ps, address.ID(), nick, *roomFlag)
 	time.Sleep(time.Second)
 	balance = sendBalnce(address.ID())
 	mutex.Lock()
@@ -124,7 +127,7 @@ func main() {
 		}
 	}()
 	if *isCandidate {
-		validatorChannel, err = chatroom.JoinChatRoom(ctx, ps, address.ID(), nick, "validators")
+		validatorChannel, err = network.JoinChatRoom(ctx, ps, address.ID(), nick, "validators")
 		go pickWinner()
 	}
 	go receveMessage()
@@ -134,12 +137,12 @@ func main() {
 }
 
 func sendBalnce(id peer.ID) int {
-	time.Sleep(time.Second)
 	e_data, _ := base64.RawURLEncoding.DecodeString(id.String())
 	newPeerId := int(math.Abs(float64(new(big.Int).SetBytes(e_data).Int64()))) % 100
 	if newPeerId == 0 {
 		newPeerId = 1
 	}
+
 	cr.Publish(type_def.Balance{
 		Value:       newPeerId,
 		Typ:         "balance",
@@ -216,9 +219,10 @@ func receveMessage() {
 				println("delegate balance from ", address.ID().String(), delegateBalance, message.SenderID)
 			}
 		case "submit":
-			if !*isCandidate {
-				continue
-			}
+			//todo undo commit
+			//if !*isCandidate {
+			//	continue
+			//}
 			submited_block := type_def.Block{
 				Typ:       map_message["typ"].(string),
 				OwnerNick: map_message["owner_nick"].(string),
@@ -235,7 +239,7 @@ func receveMessage() {
 			newBlock := submited_block
 			if CheckBlockValid(newBlock, oldLastBlock) {
 				submited_block.Typ = "ack_submit"
-				validatorChannel.Publish(submited_block)
+				cr.Publish(submited_block)
 			}
 		case "ack_submit":
 			ack_submited_block := type_def.Block{
@@ -283,7 +287,7 @@ func pickWinner() {
 					lotteryPool = append(lotteryPool, validator)
 				}
 			}
-			if balance <= len(lotteryPool)/2 {
+			if !*isCandidate {
 				time.Sleep(time.Second)
 				continue
 			}
@@ -296,13 +300,13 @@ func pickWinner() {
 			//println("winner",winnerIndex,winner)
 			//if winner != address.ID().String() {
 			//	println("not win")
-			//	time.Sleep(time.Second)
 			//	continue
 			//}
 
 			// add block of winner to blockchain and let all the other nodes know
 
 			for _, block := range temp {
+				timer := prometheusClinet.NewTimer(prometheus.BlockCreationDuration.WithLabelValues("srbft"))
 				mutex.Lock()
 				temp = temp[1:]
 				tempBlocks = tempBlocks[1:]
@@ -319,8 +323,8 @@ func pickWinner() {
 					Blockchain = append(Blockchain, newBlock)
 					mutex.Unlock()
 					newBlock.Typ = "generated_block"
-					validatorChannel.Publish(newBlock)
-					time.Sleep(time.Second)
+					cr.Publish(newBlock)
+					timer.ObserveDuration()
 					println("new block added")
 					break
 				} else {
@@ -351,7 +355,7 @@ func isBlockValid(newBlock, oldBlock type_def.Block) bool {
 	cr.Publish(newBlock)
 	timeout := make(chan bool, 1)
 	go func() {
-		time.Sleep(5 * time.Second)
+		time.Sleep(time.Second * 2)
 		timeout <- true
 	}()
 	select {
@@ -359,7 +363,7 @@ func isBlockValid(newBlock, oldBlock type_def.Block) bool {
 		if ch.Hash == newBlock.Hash {
 			blockValidatorLen++
 		}
-		if blockValidatorLen > 1 {
+		if blockValidatorLen > 2 {
 			println("block validated")
 			return true
 		}
@@ -421,12 +425,17 @@ func generateBlock(oldBlock type_def.Block, BPM int, address string) (type_def.B
 
 func makeMuxRouter() http.Handler {
 	muxRouter := mux.NewRouter()
+	muxRouter.Path("/metrics").Handler(promhttp.Handler())
+
+	// Serving static files
+
 	muxRouter.HandleFunc("/", handleWriteBlock).Methods("POST")
+	muxRouter.PathPrefix("/").Handler(http.FileServer(http.Dir("./static/")))
 	return muxRouter
 }
 
 func handleWriteBlock(w http.ResponseWriter, r *http.Request) {
-
+	prometheus.TotalTransaction.WithLabelValues("transction").Inc()
 	w.Header().Set("Content-Type", "application/json")
 	var m type_def.BlockMessage
 

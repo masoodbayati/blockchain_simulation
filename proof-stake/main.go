@@ -6,8 +6,10 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
-	"github.com/blockchain-tutorial/proof-stake/chatroom"
+	"github.com/blockchain-tutorial/prometheus"
+	"github.com/blockchain-tutorial/proof-stake/network"
 	type_def "github.com/blockchain-tutorial/proof-stake/type"
 	"github.com/gorilla/mux"
 	"github.com/libp2p/go-libp2p"
@@ -15,6 +17,8 @@ import (
 	"github.com/libp2p/go-libp2p-core/peer"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
+	prometheusClinet "github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"log"
 	"math"
 	"math/big"
@@ -27,7 +31,6 @@ import (
 )
 
 // Block represents each 'item' in the blockchain
-
 
 // Blockchain is a series of validated Blocks
 var Blockchain []type_def.Block
@@ -44,9 +47,11 @@ var mutex = &sync.Mutex{}
 // validators keeps track of open validators and balances
 var validators = make(map[string]int)
 var nick string
-var cr *chatroom.ChatRoom
+var cr *network.ChatRoom
 var address host.Host
+
 func main() {
+	prometheus.InitPrometheus()
 	ctx := context.Background()
 	roomFlag := "test"
 
@@ -66,45 +71,43 @@ func main() {
 
 	// use the nickname from the cli flag, or a default if blank
 
-
 	nick = defaultNick(address.ID())
 
 	// join the room from the cli flag, or the flag default
 
 	// join the chat room
-	cr, err = chatroom.JoinChatRoom(ctx, ps, address.ID(), nick, roomFlag)
+	cr, err = network.JoinChatRoom(ctx, ps, address.ID(), nick, roomFlag)
 	if err != nil {
 		panic(err)
 	}
 	mux := makeMuxRouter()
-	httpPort := "8082"
-	log.Println("HTTP Server Listening on port :", httpPort)
+	httpPort := flag.String("port", "9091", "an int")
+	flag.Parse()
+	log.Println("HTTP Server Listening on port :", *httpPort)
 	s := &http.Server{
-		Addr:           ":" + httpPort,
+		Addr:           ":" + *httpPort,
 		Handler:        mux,
 		ReadTimeout:    10 * time.Second,
 		WriteTimeout:   10 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
 
-
 	// create genesis block
 	t := time.Now()
 	genesisBlock := type_def.Block{}
 	genesisBlock = type_def.Block{
-		Typ:        "generated_block",
-		OwnerNick:  "",
-		Index:      0,
-		Timestamp:  t.String(),
-		BPM:        0,
-		Hash:       calculateBlockHash(genesisBlock),
-		PrevHash:   "",
-		Nonce:      "",
-		Validator:  "",
+		Typ:       "generated_block",
+		OwnerNick: "",
+		Index:     0,
+		Timestamp: t.String(),
+		BPM:       0,
+		Hash:      calculateBlockHash(genesisBlock),
+		PrevHash:  "",
+		Nonce:     "",
+		Validator: "",
 	}
 	spew.Dump(genesisBlock)
 	Blockchain = append(Blockchain, genesisBlock)
-
 
 	// start TCP and serve TCP server
 
@@ -132,42 +135,41 @@ func main() {
 	}
 }
 
-
 func receveMessage() {
 	for {
-		message :=<- cr.Messages
-		println(message.Message,message.SenderID)
+		message := <-cr.Messages
+		println(message.Message, message.SenderID)
 		map_message := message.Message.(map[string]interface{})
 		switch map_message["typ"] {
 		case "pending_block":
-				candidateBlocks <- type_def.BlockMessage{
-					BPM: int(map_message["bpm"].(float64)),
-					Index: int(map_message["index"].(float64)),
-					Typ: "pending_block",
-				}
+			candidateBlocks <- type_def.BlockMessage{
+				BPM:   int(map_message["bpm"].(float64)),
+				Index: int(map_message["index"].(float64)),
+				Typ:   "pending_block",
+			}
 
 		case "generated_block":
 			generated_block := type_def.Block{
-				Typ:        map_message["typ"].(string),
-				OwnerNick:  map_message["owner_nick"].(string),
-				Index:      int(map_message["index"].(float64)),
-				Timestamp:  map_message["timestamp"].(string),
-				BPM:        int(map_message["bpm"].(float64)),
-				Hash:       map_message["hash"].(string),
-				PrevHash:   map_message["prev_hash"].(string),
-				Nonce:      map_message["nonce"].(string),
+				Typ:       map_message["typ"].(string),
+				OwnerNick: map_message["owner_nick"].(string),
+				Index:     int(map_message["index"].(float64)),
+				Timestamp: map_message["timestamp"].(string),
+				BPM:       int(map_message["bpm"].(float64)),
+				Hash:      map_message["hash"].(string),
+				PrevHash:  map_message["prev_hash"].(string),
+				Nonce:     map_message["nonce"].(string),
 			}
 			mutex.Lock()
 			oldLastBlock := Blockchain[len(Blockchain)-1]
 			mutex.Unlock()
-			newBlock :=generated_block
+			newBlock := generated_block
 			if isBlockValid(newBlock, oldLastBlock) {
-				println("newBlock",newBlock.Index,newBlock.BPM)
+				println("newBlock", newBlock.Index, newBlock.BPM)
 				mutex.Lock()
 				Blockchain = append(Blockchain, newBlock)
 				mutex.Unlock()
 				println("new block added")
-			}else{
+			} else {
 				println("block is invalid")
 			}
 		default:
@@ -175,19 +177,17 @@ func receveMessage() {
 			continue
 		}
 
-
 	}
 }
 
 // pickWinner creates a lottery pool of validators and chooses the validator who gets to forge a block to the blockchain
 // by random selecting from the pool, weighted by amount of tokens staked
 func pickWinner() {
-	time.Sleep(10*time.Second)
+	time.Sleep(1 * time.Second)
 	for {
-		if time.Now().Second()%10 != 0 {
-			time.Sleep(time.Second)
-			continue
-		}
+		//if time.Now().Second()%10 != 0 {
+		//	continue
+		//}
 		//rounTime := time.Now().Unix()/10 % 1000000
 
 		mutex.Lock()
@@ -200,56 +200,58 @@ func pickWinner() {
 			// slightly modified traditional proof of stake algorithm
 			// from all validators who submitted a block, weight them by the number of staked tokens
 			// in traditional proof of stake, validators can participate without submitting a block to be forged
-			for validator,balance := range validators{
-					for i := 0; i < balance; i++ {
-						lotteryPool = append(lotteryPool, validator)
-					}
+			for validator, balance := range validators {
+				for i := 0; i < balance; i++ {
+					lotteryPool = append(lotteryPool, validator)
 				}
+			}
 
 			mutex.Lock()
 			lastBlock := Blockchain[len(Blockchain)-1]
 			mutex.Unlock()
-			winnerIndex := lastBlock.BPM%len(lotteryPool)
+			winnerIndex := lastBlock.BPM % len(lotteryPool)
 			winner := lotteryPool[winnerIndex]
-			println("winner",winnerIndex,winner)
+			println("winner", winnerIndex, winner)
 			if winner != address.ID().String() {
 				println("not win")
 				time.Sleep(time.Second)
 				continue
 			}
 
-
 			// add block of winner to blockchain and let all the other nodes know
 
+			//prometheus.BlockCreationDuration.WithLabelValues("proof-stake-time").Observe(float64(time.Second*12))
 			for _, block := range temp {
+				timer := prometheusClinet.NewTimer(prometheus.BlockCreationDuration.WithLabelValues("proof_of_stake"))
+
 				mutex.Lock()
 				temp = temp[1:]
 				tempBlocks = tempBlocks[1:]
 				lastBlock := Blockchain[len(Blockchain)-1]
 				mutex.Unlock()
-				if block.Index<= lastBlock.Index {
+				if block.Index <= lastBlock.Index {
 					continue
 				}
 
-				newBlock,_ := generateBlock(lastBlock,block.BPM,address.ID().String())
+				newBlock, _ := generateBlock(lastBlock, block.BPM, address.ID().String())
 				if isBlockValid(newBlock, lastBlock) {
-					println("newBlock",newBlock.Index,newBlock.BPM)
+					println("newBlock", newBlock.Index, newBlock.BPM)
 					mutex.Lock()
 					Blockchain = append(Blockchain, newBlock)
 					mutex.Unlock()
 					cr.Publish(newBlock)
-					time.Sleep(time.Second)
 					println("new block added")
+					timer.ObserveDuration()
 					break
-				}else{
+				} else {
 					println("block is invalid")
+					timer.ObserveDuration()
 				}
 
-				}
+			}
 		}
 	}
-	}
-
+}
 
 // isBlockValid makes sure block is valid by checking index
 // and comparing the hash of the previous block
@@ -304,7 +306,10 @@ func generateBlock(oldBlock type_def.Block, BPM int, address string) (type_def.B
 
 func makeMuxRouter() http.Handler {
 	muxRouter := mux.NewRouter()
+	muxRouter.Path("/metrics").Handler(promhttp.Handler())
 	muxRouter.HandleFunc("/", handleWriteBlock).Methods("POST")
+	muxRouter.PathPrefix("/").Handler(http.FileServer(http.Dir("./static/")))
+
 	return muxRouter
 }
 
@@ -325,11 +330,11 @@ func handleWriteBlock(w http.ResponseWriter, r *http.Request) {
 	lastBlock := Blockchain[len(Blockchain)-1]
 	oldLastIndex := lastBlock.Index
 
-	if len(tempBlocks) >0 && tempBlocks[len(tempBlocks)-1].Index>lastBlock.Index{
+	if len(tempBlocks) > 0 && tempBlocks[len(tempBlocks)-1].Index > lastBlock.Index {
 		oldLastIndex = tempBlocks[len(tempBlocks)-1].Index
 	}
 	mutex.Unlock()
-	m.Index =oldLastIndex+1
+	m.Index = oldLastIndex + 1
 
 	// create newBlock for consideration to be forged
 	candidateBlocks <- type_def.BlockMessage{
@@ -339,20 +344,11 @@ func handleWriteBlock(w http.ResponseWriter, r *http.Request) {
 	}
 	println()
 	err := cr.Publish(m)
-	if err!= nil{
-		println("err in publish",err)
+	if err != nil {
+		println("err in publish", err)
 	}
 	respondWithJSON(w, r, http.StatusCreated, "test")
 }
-
-
-
-
-
-
-
-
-
 
 func respondWithJSON(w http.ResponseWriter, r *http.Request, code int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -369,13 +365,15 @@ func respondWithJSON(w http.ResponseWriter, r *http.Request, code int, payload i
 type discoveryNotifee struct {
 	h host.Host
 }
+
 const DiscoveryServiceTag = "pubsub-chat-example"
+
 func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
 	e_data, _ := base64.RawURLEncoding.DecodeString(pi.ID.String())
-	newPeerId := int(math.Abs(float64(new(big.Int).SetBytes(e_data).Int64())))%100
+	newPeerId := int(math.Abs(float64(new(big.Int).SetBytes(e_data).Int64()))) % 100
 
-	println("new peer id",newPeerId)
-	if newPeerId == 0{
+	println("new peer id", newPeerId)
+	if newPeerId == 0 {
 		newPeerId = 1
 	}
 	mutex.Lock()

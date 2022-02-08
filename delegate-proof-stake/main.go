@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/blockchain-tutorial/delegate-proof-stake/chatroom"
+	"github.com/blockchain-tutorial/delegate-proof-stake/network"
 	type_def "github.com/blockchain-tutorial/delegate-proof-stake/type"
 	"github.com/gorilla/mux"
 	"github.com/libp2p/go-libp2p"
@@ -29,7 +29,6 @@ import (
 
 // Block represents each 'item' in the blockchain
 
-
 // Blockchain is a series of validated Blocks
 var Blockchain []type_def.Block
 var tempBlocks []type_def.BlockMessage
@@ -45,8 +44,9 @@ var mutex = &sync.Mutex{}
 // validators keeps track of open validators and balances
 var validators = make(map[string]int)
 var nick string
-var cr *chatroom.ChatRoom
+var cr *network.ChatRoom
 var address host.Host
+
 func main() {
 	ctx := context.Background()
 	roomFlag := "test"
@@ -67,13 +67,12 @@ func main() {
 
 	// use the nickname from the cli flag, or a default if blank
 
-
 	nick = defaultNick(address.ID())
 
 	// join the room from the cli flag, or the flag default
 
 	// join the chat room
-	cr, err = chatroom.JoinChatRoom(ctx, ps, address.ID(), nick, roomFlag)
+	cr, err = network.JoinChatRoom(ctx, ps, address.ID(), nick, roomFlag)
 	time.Sleep(time.Second)
 	if err != nil {
 		panic(err)
@@ -91,24 +90,22 @@ func main() {
 		MaxHeaderBytes: 1 << 20,
 	}
 
-
 	// create genesis block
 	t := time.Now()
 	genesisBlock := type_def.Block{}
 	genesisBlock = type_def.Block{
-		Typ:        "generated_block",
-		OwnerNick:  "",
-		Index:      0,
-		Timestamp:  t.String(),
-		BPM:        0,
-		Hash:       calculateBlockHash(genesisBlock),
-		PrevHash:   "",
-		Nonce:      "",
-		Validator:  "",
+		Typ:       "generated_block",
+		OwnerNick: "",
+		Index:     0,
+		Timestamp: t.String(),
+		BPM:       0,
+		Hash:      calculateBlockHash(genesisBlock),
+		PrevHash:  "",
+		Nonce:     "",
+		Validator: "",
 	}
 	spew.Dump(genesisBlock)
 	Blockchain = append(Blockchain, genesisBlock)
-
 
 	// start TCP and serve TCP server
 
@@ -136,56 +133,55 @@ func main() {
 	}
 }
 
-
 func receveMessage() {
 	for {
-		message :=<- cr.Messages
-		println(message.Message,message.SenderID)
+		message := <-cr.Messages
+		println(message.Message, message.SenderID)
 		map_message := message.Message.(map[string]interface{})
 		switch map_message["typ"] {
 		case "pending_block":
-				candidateBlocks <- type_def.BlockMessage{
-					BPM: int(map_message["bpm"].(float64)),
-					Index: int(map_message["index"].(float64)),
-					Typ: "pending_block",
-				}
+			candidateBlocks <- type_def.BlockMessage{
+				BPM:   int(map_message["bpm"].(float64)),
+				Index: int(map_message["index"].(float64)),
+				Typ:   "pending_block",
+			}
 
 		case "generated_block":
 			generated_block := type_def.Block{
-				Typ:        map_message["typ"].(string),
-				OwnerNick:  map_message["owner_nick"].(string),
-				Index:      int(map_message["index"].(float64)),
-				Timestamp:  map_message["timestamp"].(string),
-				BPM:        int(map_message["bpm"].(float64)),
-				Hash:       map_message["hash"].(string),
-				PrevHash:   map_message["prev_hash"].(string),
-				Nonce:      map_message["nonce"].(string),
+				Typ:       map_message["typ"].(string),
+				OwnerNick: map_message["owner_nick"].(string),
+				Index:     int(map_message["index"].(float64)),
+				Timestamp: map_message["timestamp"].(string),
+				BPM:       int(map_message["bpm"].(float64)),
+				Hash:      map_message["hash"].(string),
+				PrevHash:  map_message["prev_hash"].(string),
+				Nonce:     map_message["nonce"].(string),
 			}
 			mutex.Lock()
 			oldLastBlock := Blockchain[len(Blockchain)-1]
 			mutex.Unlock()
-			newBlock :=generated_block
+			newBlock := generated_block
 			if isBlockValid(newBlock, oldLastBlock) {
-				println("newBlock",newBlock.Index,newBlock.BPM)
+				println("newBlock", newBlock.Index, newBlock.BPM)
 				mutex.Lock()
 				Blockchain = append(Blockchain, newBlock)
-				if balance >50 && validators[message.SenderID] > 50 {
-					delegateBalance := balance-50
+				if balance > 50 && validators[message.SenderID] > 50 {
+					delegateBalance := balance - 50
 					balance = 50
 					cr.Publish(type_def.Delegate{
-						Balance: delegateBalance,
+						Balance:     delegateBalance,
 						FromAddress: address.ID().String(),
-						ToAddress: message.SenderID,
-						Typ:     "delegate",
+						ToAddress:   message.SenderID,
+						Typ:         "delegate",
 					})
 					validators[address.ID().String()] = 50
-					validators[message.SenderID] = validators[message.SenderID]+delegateBalance
-					println("delegate balance from ",address.ID().String(),delegateBalance,message.SenderID)
+					validators[message.SenderID] = validators[message.SenderID] + delegateBalance
+					println("delegate balance from ", address.ID().String(), delegateBalance, message.SenderID)
 
 				}
 				mutex.Unlock()
 				println("new block added")
-			}else{
+			} else {
 				println("block is invalid")
 			}
 		case "delegate":
@@ -197,7 +193,7 @@ func receveMessage() {
 			if owner_balance > 50 {
 				validators[owner] = owner_balance - delegate_balance
 				validators[delegateTo] = validators[delegateTo] + delegate_balance
-				println("delegate balance from ",owner,delegate_balance,delegateTo)
+				println("delegate balance from ", owner, delegate_balance, delegateTo)
 			}
 			mutex.Unlock()
 		default:
@@ -205,14 +201,13 @@ func receveMessage() {
 			continue
 		}
 
-
 	}
 }
 
 // pickWinner creates a lottery pool of validators and chooses the validator who gets to forge a block to the blockchain
 // by random selecting from the pool, weighted by amount of tokens staked
 func pickWinner() {
-	time.Sleep(10*time.Second)
+	time.Sleep(10 * time.Second)
 	for {
 		if time.Now().Second()%10 != 0 {
 			time.Sleep(time.Second)
@@ -230,24 +225,23 @@ func pickWinner() {
 			// slightly modified traditional proof of stake algorithm
 			// from all validators who submitted a block, weight them by the number of staked tokens
 			// in traditional proof of stake, validators can participate without submitting a block to be forged
-			for validator,balance := range validators{
-					for i := 0; i < balance; i++ {
-						lotteryPool = append(lotteryPool, validator)
-					}
+			for validator, balance := range validators {
+				for i := 0; i < balance; i++ {
+					lotteryPool = append(lotteryPool, validator)
 				}
+			}
 
 			mutex.Lock()
 			lastBlock := Blockchain[len(Blockchain)-1]
 			mutex.Unlock()
-			winnerIndex := lastBlock.BPM%len(lotteryPool)
+			winnerIndex := lastBlock.BPM % len(lotteryPool)
 			winner := lotteryPool[winnerIndex]
-			println("winner",winnerIndex,winner)
+			println("winner", winnerIndex, winner)
 			if winner != address.ID().String() {
 				println("not win")
 				time.Sleep(time.Second)
 				continue
 			}
-
 
 			// add block of winner to blockchain and let all the other nodes know
 
@@ -257,13 +251,13 @@ func pickWinner() {
 				tempBlocks = tempBlocks[1:]
 				lastBlock := Blockchain[len(Blockchain)-1]
 				mutex.Unlock()
-				if block.Index<= lastBlock.Index {
+				if block.Index <= lastBlock.Index {
 					continue
 				}
 
-				newBlock,_ := generateBlock(lastBlock,block.BPM,address.ID().String())
+				newBlock, _ := generateBlock(lastBlock, block.BPM, address.ID().String())
 				if isBlockValid(newBlock, lastBlock) {
-					println("newBlock",newBlock.Index,newBlock.BPM)
+					println("newBlock", newBlock.Index, newBlock.BPM)
 					mutex.Lock()
 					Blockchain = append(Blockchain, newBlock)
 					mutex.Unlock()
@@ -271,15 +265,14 @@ func pickWinner() {
 					time.Sleep(time.Second)
 					println("new block added")
 					break
-				}else{
+				} else {
 					println("block is invalid")
 				}
 
-				}
+			}
 		}
 	}
-	}
-
+}
 
 // isBlockValid makes sure block is valid by checking index
 // and comparing the hash of the previous block
@@ -355,11 +348,11 @@ func handleWriteBlock(w http.ResponseWriter, r *http.Request) {
 	lastBlock := Blockchain[len(Blockchain)-1]
 	oldLastIndex := lastBlock.Index
 
-	if len(tempBlocks) >0 && tempBlocks[len(tempBlocks)-1].Index>lastBlock.Index{
+	if len(tempBlocks) > 0 && tempBlocks[len(tempBlocks)-1].Index > lastBlock.Index {
 		oldLastIndex = tempBlocks[len(tempBlocks)-1].Index
 	}
 	mutex.Unlock()
-	m.Index =oldLastIndex+1
+	m.Index = oldLastIndex + 1
 
 	// create newBlock for consideration to be forged
 	candidateBlocks <- type_def.BlockMessage{
@@ -369,20 +362,11 @@ func handleWriteBlock(w http.ResponseWriter, r *http.Request) {
 	}
 	println()
 	err := cr.Publish(m)
-	if err!= nil{
-		println("err in publish",err)
+	if err != nil {
+		println("err in publish", err)
 	}
 	respondWithJSON(w, r, http.StatusCreated, "test")
 }
-
-
-
-
-
-
-
-
-
 
 func respondWithJSON(w http.ResponseWriter, r *http.Request, code int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -399,15 +383,17 @@ func respondWithJSON(w http.ResponseWriter, r *http.Request, code int, payload i
 type discoveryNotifee struct {
 	h host.Host
 }
+
 const DiscoveryServiceTag = "pubsub-chat-example"
+
 func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
 	e_data, _ := base64.RawURLEncoding.DecodeString(pi.ID.String())
-	newPeerId := int(math.Abs(float64(new(big.Int).SetBytes(e_data).Int64())))%100
-	if pi.ID.String()== address.ID().String(){
+	newPeerId := int(math.Abs(float64(new(big.Int).SetBytes(e_data).Int64()))) % 100
+	if pi.ID.String() == address.ID().String() {
 		balance = newPeerId
 	}
-	println("new peer id",newPeerId)
-	if newPeerId == 0{
+	println("new peer id", newPeerId)
+	if newPeerId == 0 {
 		newPeerId = 1
 	}
 	mutex.Lock()
@@ -428,7 +414,6 @@ func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
 	//	println("delegate balance from ",address.ID().String(),delegateBalance,pi.ID.String())
 	//	mutex.Unlock()
 	//}
-
 
 	fmt.Printf("discovered new peer %s\n", pi.ID.Pretty())
 	err := n.h.Connect(context.Background(), pi)

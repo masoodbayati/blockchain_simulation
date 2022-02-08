@@ -1,4 +1,4 @@
-package chatroom
+package network
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 )
 
 // ChatRoomBufSize is the number of incoming messages to buffer for each topic.
-const ChatRoomBufSize = 128
+const ChatRoomBufSize = 11024
 
 // ChatRoom represents a subscription to a single PubSub topic. Messages
 // can be published to the topic with ChatRoom.Publish, and received
